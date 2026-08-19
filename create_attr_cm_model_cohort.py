@@ -1,0 +1,259 @@
+﻿"""
+create_attr_cm_model_cohort.py
+-----------------------------
+Create the initial ATTR-CM risk cohort and model-ready feature table.
+
+This is the first reduced population for a predictive model: a clinically
+meaningful candidate cohort built from the patient journey outputs. The cohort
+is restricted to patients with at least one red flag, HF/HFpEF signal, or
+ATTR-related procedure / red-flag cluster, and excludes patients with no
+relevant event history.
+
+Usage:
+    py -3 create_attr_cm_model_cohort.py
+
+Optional environment variable:
+    SNOWFLAKE_OUTPUT_TABLE
+"""
+
+import os
+import sys
+
+from create_undiagnosed_output_table import build_session
+
+COHORT_TABLE = "VAW_AMER_DESIGN.US_VYNDA_DT_2.US_VYNDA_DT_2_ATTR_CM_MODEL_COHORT_INF"
+FEATURE_TABLE = "VAW_AMER_DESIGN.US_VYNDA_DT_2.US_VYNDA_DT_2_ATTR_CM_MODEL_FEATURES_INF"
+
+
+def build_cohort_sql():
+    return """
+WITH candidate_patients AS (
+    SELECT DISTINCT PATIENT_ID
+    FROM VAW_AMER_DESIGN.US_VYNDA_DT_2.US_VYNDA_DT_2_PATIENT_JOURNEY_EVENTS_INF
+    WHERE EVENT_NAME IN (
+        'AFIB',
+        'HEART_FAILURE',
+        'HFPEF',
+        'AORTIC_STENOSIS',
+        'AV_BLOCK',
+        'CARPAL_TUNNEL_SYNDROME',
+        'BICEP_TENDON_RUPTURE',
+        'SPINAL_STENOSIS',
+        'PX_PYP',
+        'PX_IHC',
+        'PX_TAVR',
+        'PX_CARDIAC_MRI',
+        'PX_ECHO_CARDIOGRAPHY',
+        'PX_ECG',
+        'PX_GENETIC_TESTING',
+        'PX_PROTEIN_ELECTROPHORESIS',
+        'PX_FLC',
+        'PX_CARDIAC_BIOPSY'
+    )
+),
+cohort_candidates AS (
+    SELECT m.*
+    FROM VAW_AMER_DESIGN.US_VYNDA_DT_2.US_VYNDA_DT_2_PATIENT_JOURNEY_MILESTONES_INF m
+    INNER JOIN candidate_patients c
+        ON c.PATIENT_ID = m.PATIENT_ID
+),
+cohort AS (
+    SELECT
+        c.PATIENT_ID,
+        c.CLAIM_ROW_COUNT,
+        c.FIRST_CLAIM_DATE,
+        c.LAST_CLAIM_DATE,
+        c.FIRST_AFIB_DATE,
+        c.FIRST_CARPAL_TUNNEL_DATE,
+        c.FIRST_AORTIC_STENOSIS_DATE,
+        c.FIRST_BICEP_RUPTURE_DATE,
+        c.FIRST_SPINAL_STENOSIS_DATE,
+        c.FIRST_AV_BLOCK_DATE,
+        c.FIRST_HF_DATE,
+        c.FIRST_HFPEF_DATE,
+        c.FIRST_PYP_DATE,
+        c.FIRST_IHC_DATE,
+        c.FIRST_TAVR_DATE,
+        c.FIRST_SERUM_IMMUNOFIXATION_DATE,
+        c.FIRST_URINE_IMMUNOFIXATION_DATE,
+        c.FIRST_MS_DATE,
+        c.FIRST_MYOCARDIAL_DATE,
+        c.FIRST_RECTAL_BIOPSY_DATE,
+        c.FIRST_FAT_PAD_BIOPSY_DATE,
+        c.FIRST_ECHO_STRAIN_DATE,
+        c.FIRST_CARDIAC_MRI_DATE,
+        c.FIRST_ECG_DATE,
+        c.FIRST_FREE_LIGHT_CHAIN_DATE,
+        c.FIRST_CARDIAC_BIOPSY_DATE,
+        c.FIRST_ECHO_CARDIOGRAPHY_DATE,
+        c.FIRST_GENETIC_TESTING_DATE,
+        c.FIRST_PROTEIN_ELECTROPHORESIS_DATE,
+        c.FIRST_KAPPA_LAMBDA_DATE,
+        c.TOTAL_CONDITIONS,
+        c.FIRST_RED_FLAG_DATE,
+        c.DATE_2PLUS_QUALIFIED,
+        c.FLAG_2PLUS_CONDITIONS,
+        c.FLAG_2PLUS_AND_HF,
+        c.FLAG_2PLUS_AND_HFPEF,
+        c.FIRST_ATTR_CM_DX_DATE,
+        c.ATTR_CM_DIAGNOSED_FLAG,
+        c.RED_FLAGS_BEFORE_ATTR_DX,
+        c.DAYS_FROM_FIRST_HF_TO_ATTR_DX,
+        c.DAYS_FROM_FIRST_RED_FLAG_TO_ATTR_DX,
+        c.DAYS_FROM_2PLUS_TO_ATTR_DX,
+        CASE
+            WHEN c.FIRST_ATTR_CM_DX_DATE IS NOT NULL THEN c.FIRST_ATTR_CM_DX_DATE
+            WHEN c.FIRST_HF_DATE IS NOT NULL THEN c.FIRST_HF_DATE
+            WHEN c.FIRST_HFPEF_DATE IS NOT NULL THEN c.FIRST_HFPEF_DATE
+            WHEN c.FIRST_AFIB_DATE IS NOT NULL THEN c.FIRST_AFIB_DATE
+            WHEN c.FIRST_RED_FLAG_DATE IS NOT NULL THEN c.FIRST_RED_FLAG_DATE
+            ELSE c.LAST_CLAIM_DATE
+        END AS INDEX_DATE,
+        CASE
+            WHEN c.FIRST_ATTR_CM_DX_DATE IS NOT NULL THEN 1 ELSE 0
+        END AS LABEL_ATTR_CM,
+        CASE
+            WHEN COALESCE(c.FIRST_AFIB_DATE, c.FIRST_HF_DATE, c.FIRST_HFPEF_DATE, c.FIRST_AORTIC_STENOSIS_DATE, c.FIRST_AV_BLOCK_DATE, c.FIRST_CARPAL_TUNNEL_DATE) IS NOT NULL THEN 1 ELSE 0
+        END AS HAS_RELEVANT_RED_FLAG,
+        CASE
+            WHEN c.FIRST_HF_DATE IS NOT NULL OR c.FIRST_HFPEF_DATE IS NOT NULL THEN 1 ELSE 0
+        END AS HAS_HF_OR_HFPEF,
+        CASE
+            WHEN c.FIRST_AORTIC_STENOSIS_DATE IS NOT NULL THEN 1 ELSE 0
+        END AS HAS_AORTIC_STENOSIS,
+        CASE
+            WHEN c.FIRST_PYP_DATE IS NOT NULL OR c.FIRST_IHC_DATE IS NOT NULL OR c.FIRST_TAVR_DATE IS NOT NULL OR c.FIRST_CARDIAC_MRI_DATE IS NOT NULL OR c.FIRST_ECHO_CARDIOGRAPHY_DATE IS NOT NULL OR c.FIRST_ECG_DATE IS NOT NULL OR c.FIRST_GENETIC_TESTING_DATE IS NOT NULL OR c.FIRST_PROTEIN_ELECTROPHORESIS_DATE IS NOT NULL OR c.FIRST_FREE_LIGHT_CHAIN_DATE IS NOT NULL OR c.FIRST_CARDIAC_BIOPSY_DATE IS NOT NULL THEN 1 ELSE 0
+        END AS HAS_ATTR_RELEVANT_PROCEDURE,
+        CASE
+            WHEN COALESCE(c.FLAG_2PLUS_CONDITIONS, 0) = 1 THEN 1 ELSE 0
+        END AS HAS_2PLUS_RED_FLAGS
+    FROM cohort_candidates c
+    WHERE
+        COALESCE(c.FLAG_2PLUS_CONDITIONS, 0) = 1
+        OR c.FIRST_HF_DATE IS NOT NULL
+        OR c.FIRST_HFPEF_DATE IS NOT NULL
+        OR c.FIRST_AFIB_DATE IS NOT NULL
+        OR c.FIRST_AORTIC_STENOSIS_DATE IS NOT NULL
+        OR c.FIRST_AV_BLOCK_DATE IS NOT NULL
+        OR c.FIRST_PYP_DATE IS NOT NULL
+        OR c.FIRST_IHC_DATE IS NOT NULL
+        OR c.FIRST_TAVR_DATE IS NOT NULL
+        OR c.FIRST_CARDIAC_MRI_DATE IS NOT NULL
+        OR c.FIRST_ECHO_CARDIOGRAPHY_DATE IS NOT NULL
+        OR c.FIRST_ECG_DATE IS NOT NULL
+        OR c.FIRST_GENETIC_TESTING_DATE IS NOT NULL
+        OR c.FIRST_PROTEIN_ELECTROPHORESIS_DATE IS NOT NULL
+        OR c.FIRST_FREE_LIGHT_CHAIN_DATE IS NOT NULL
+        OR c.FIRST_CARDIAC_BIOPSY_DATE IS NOT NULL
+)
+SELECT *
+FROM cohort
+""".strip()
+
+
+def build_feature_sql():
+    return """
+WITH cohort AS (
+    SELECT *
+    FROM VAW_AMER_DESIGN.US_VYNDA_DT_2.US_VYNDA_DT_2_ATTR_CM_MODEL_COHORT_INF
+),
+cohort_events AS (
+    SELECT
+        e.PATIENT_ID,
+        e.EVENT_NAME,
+        e.EVENT_DATE,
+        c.INDEX_DATE,
+        c.LABEL_ATTR_CM
+    FROM VAW_AMER_DESIGN.US_VYNDA_DT_2.US_VYNDA_DT_2_PATIENT_JOURNEY_EVENTS_INF e
+    INNER JOIN cohort c
+        ON c.PATIENT_ID = e.PATIENT_ID
+    WHERE e.EVENT_DATE <= c.INDEX_DATE
+),
+features AS (
+    SELECT
+        c.PATIENT_ID,
+        c.LABEL_ATTR_CM,
+        c.INDEX_DATE,
+        c.FIRST_CLAIM_DATE,
+        c.LAST_CLAIM_DATE,
+        c.FIRST_HF_DATE,
+        c.FIRST_HFPEF_DATE,
+        c.FIRST_AFIB_DATE,
+        c.FIRST_RED_FLAG_DATE,
+        c.TOTAL_CONDITIONS,
+        c.FLAG_2PLUS_CONDITIONS,
+        c.FLAG_2PLUS_AND_HF,
+        c.FLAG_2PLUS_AND_HFPEF,
+        c.HAS_RELEVANT_RED_FLAG,
+        c.HAS_HF_OR_HFPEF,
+        c.HAS_AORTIC_STENOSIS,
+        c.HAS_ATTR_RELEVANT_PROCEDURE,
+        c.HAS_2PLUS_RED_FLAGS,
+        MAX(CASE WHEN ce.EVENT_NAME = 'AFIB' THEN 1 ELSE 0 END) AS AFIB_PREINDEX_FLAG,
+        COUNT(DISTINCT CASE WHEN ce.EVENT_NAME = 'AFIB' THEN ce.EVENT_DATE END) AS AFIB_PREINDEX_COUNT,
+        MAX(CASE WHEN ce.EVENT_NAME = 'HEART_FAILURE' THEN 1 ELSE 0 END) AS HF_PREINDEX_FLAG,
+        COUNT(DISTINCT CASE WHEN ce.EVENT_NAME = 'HEART_FAILURE' THEN ce.EVENT_DATE END) AS HF_PREINDEX_COUNT,
+        MAX(CASE WHEN ce.EVENT_NAME = 'HFPEF' THEN 1 ELSE 0 END) AS HFPEF_PREINDEX_FLAG,
+        COUNT(DISTINCT CASE WHEN ce.EVENT_NAME = 'HFPEF' THEN ce.EVENT_DATE END) AS HFPEF_PREINDEX_COUNT,
+        MAX(CASE WHEN ce.EVENT_NAME IN ('AFIB', 'CARPAL_TUNNEL_SYNDROME', 'AORTIC_STENOSIS', 'BICEP_TENDON_RUPTURE', 'SPINAL_STENOSIS', 'AV_BLOCK') THEN 1 ELSE 0 END) AS RED_FLAG_PREINDEX_FLAG,
+        COUNT(DISTINCT CASE WHEN ce.EVENT_NAME IN ('AFIB', 'CARPAL_TUNNEL_SYNDROME', 'AORTIC_STENOSIS', 'BICEP_TENDON_RUPTURE', 'SPINAL_STENOSIS', 'AV_BLOCK') THEN ce.EVENT_DATE END) AS RED_FLAG_PREINDEX_COUNT,
+        MAX(CASE WHEN ce.EVENT_NAME IN ('PX_PYP', 'PX_IHC', 'PX_TAVR', 'PX_CARDIAC_MRI', 'PX_ECHO_CARDIOGRAPHY', 'PX_ECG', 'PX_GENETIC_TESTING', 'PX_PROTEIN_ELECTROPHORESIS', 'PX_FLC', 'PX_CARDIAC_BIOPSY') THEN 1 ELSE 0 END) AS ATTR_PROCEDURE_PREINDEX_FLAG,
+        COUNT(DISTINCT CASE WHEN ce.EVENT_NAME IN ('PX_PYP', 'PX_IHC', 'PX_TAVR', 'PX_CARDIAC_MRI', 'PX_ECHO_CARDIOGRAPHY', 'PX_ECG', 'PX_GENETIC_TESTING', 'PX_PROTEIN_ELECTROPHORESIS', 'PX_FLC', 'PX_CARDIAC_BIOPSY') THEN ce.EVENT_DATE END) AS ATTR_PROCEDURE_PREINDEX_COUNT,
+        DATEDIFF('day', c.FIRST_CLAIM_DATE, c.INDEX_DATE) AS DAYS_FROM_FIRST_CLAIM_TO_INDEX
+    FROM cohort c
+    LEFT JOIN cohort_events ce
+        ON ce.PATIENT_ID = c.PATIENT_ID
+    GROUP BY
+        c.PATIENT_ID,
+        c.LABEL_ATTR_CM,
+        c.INDEX_DATE,
+        c.FIRST_CLAIM_DATE,
+        c.LAST_CLAIM_DATE,
+        c.FIRST_HF_DATE,
+        c.FIRST_HFPEF_DATE,
+        c.FIRST_AFIB_DATE,
+        c.FIRST_RED_FLAG_DATE,
+        c.TOTAL_CONDITIONS,
+        c.FLAG_2PLUS_CONDITIONS,
+        c.FLAG_2PLUS_AND_HF,
+        c.FLAG_2PLUS_AND_HFPEF,
+        c.HAS_RELEVANT_RED_FLAG,
+        c.HAS_HF_OR_HFPEF,
+        c.HAS_AORTIC_STENOSIS,
+        c.HAS_ATTR_RELEVANT_PROCEDURE,
+        c.HAS_2PLUS_RED_FLAGS
+)
+SELECT *
+FROM features
+""".strip()
+
+
+def create_model_cohort(session):
+    cohort_sql = f"CREATE OR REPLACE TABLE {COHORT_TABLE} AS\n{build_cohort_sql()}"
+    print(f"Creating reduced ATTR-CM cohort table: {COHORT_TABLE}")
+    session.sql(cohort_sql).collect()
+    count = session.table(COHORT_TABLE).count()
+    print(f"Cohort row count: {count:,}")
+
+
+def create_model_features(session):
+    feature_sql = f"CREATE OR REPLACE TABLE {FEATURE_TABLE} AS\n{build_feature_sql()}"
+    print(f"Creating model feature table: {FEATURE_TABLE}")
+    session.sql(feature_sql).collect()
+    count = session.table(FEATURE_TABLE).count()
+    print(f"Feature table row count: {count:,}")
+
+
+def main():
+    session = build_session()
+    try:
+        create_model_cohort(session)
+        create_model_features(session)
+        print("Done.")
+    finally:
+        session.close()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
